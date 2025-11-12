@@ -7,6 +7,7 @@ module I2C_Master (
     input  logic       I2C_STOP,
     input  logic       I2C_ACK,
     input  logic       I2C_EN,
+    input  logic       read_write,
     input  logic [7:0] tx_data,
     output logic       tx_done,
     output logic       tx_ready,
@@ -18,27 +19,17 @@ module I2C_Master (
 
     typedef enum {
         IDLE,
-        START1,
-        START2,
-        DATA1,
-        DATA2,
-        DATA3,
-        DATA4,
-        READ_DATA1,
-        READ_DATA2,
-        READ_DATA3,
-        READ_DATA4,
-        ACK1,
-        ACK2,
-        ACK3,
-        ACK4,
+        START,
+        ADDR,
+        ACK,
         HOLD,
-        STOP1,
-        STOP2
+        WRITE,
+        READ,
+        STOP
     } state_s;
 
     state_s state, state_next;
-    logic [8:0] clk_cnt_reg, clk_cnt_next;
+    logic [11:0] clk_cnt_reg, clk_cnt_next;
     logic [2:0] bit_cnt_reg, bit_cnt_next;
     logic [7:0] tx_data_reg, tx_data_next;
     logic [7:0] rx_data_reg, rx_data_next;
@@ -108,60 +99,26 @@ module I2C_Master (
                     tx_ready_next = 0;
                     SDA_out_next  = 0;
                     SCL_next      = 1;
-                    state_next    = START1;
+                    state_next    = START;
+                end else begin
+                    state_next = IDLE;
                 end
             end
 
-            START1: begin
-                if (clk_cnt_reg == 499) begin
-                    clk_cnt_next = 0;
-                    SCL_next     = 0;
-                    state_next   = START2;
-                end else clk_cnt_next = clk_cnt_reg + 1;
-            end
-
-            START2: begin
-                if (clk_cnt_reg == 499) begin
+            START: begin
+                if (clk_cnt_reg == 999) begin
                     clk_cnt_next = 0;
                     SDA_out_next = tx_data_reg[7];
                     SDA_en_next  = 1;
                     SCL_next     = 0;
-                    state_next   = DATA1;
-                end else clk_cnt_next = clk_cnt_reg + 1;
+                    state_next   = ADDR;
+                end else begin
+                    clk_cnt_next = clk_cnt_reg + 1;
+                    state_next   = START;
+                end
             end
 
-            DATA1: begin
-                SDA_en_next  = 1;
-                SDA_out_next = tx_data_reg[7];
-                if (clk_cnt_reg == 249) begin
-                    clk_cnt_next = 0;
-                    SCL_next = 1;
-                    state_next = DATA2;
-                end else clk_cnt_next = clk_cnt_reg + 1;
-            end
-
-            DATA2: begin
-                SDA_en_next  = 1;
-                SDA_out_next = tx_data_reg[7];
-                if (clk_cnt_reg == 249) begin
-                    clk_cnt_next = 0;
-                    SCL_next = 1;
-                    state_next = DATA3;
-                end else clk_cnt_next = clk_cnt_reg + 1;
-            end
-
-            DATA3: begin
-                SDA_en_next  = 1;
-                SDA_out_next = tx_data_reg[7];
-                if (clk_cnt_reg == 249) begin
-                    clk_cnt_next = 0;
-                    SCL_next = 0;
-                    tx_data_next = {tx_data_reg[6:0], 1'b0};
-                    state_next = DATA4;
-                end else clk_cnt_next = clk_cnt_reg + 1;
-            end
-
-            DATA4: begin
+            ADDR: begin
                 SDA_en_next  = 1;
                 SDA_out_next = tx_data_reg[7];
                 if (clk_cnt_reg == 249) begin
@@ -170,118 +127,87 @@ module I2C_Master (
                         bit_cnt_next = 0;
                         SDA_en_next  = 0;
                         tx_done_next = 1;
-                        state_next   = ACK1;
+                        state_next   = ACK;
                     end else begin
                         bit_cnt_next = bit_cnt_reg + 1;
-                        state_next   = DATA1;
+                        state_next   = ADDR;
                     end
                 end else clk_cnt_next = clk_cnt_reg + 1;
             end
 
-            READ_DATA1: begin
+            ACK: begin
                 SDA_en_next = 0;
-                SCL_next = 0;
                 if (clk_cnt_reg == 249) begin
+                    SCL_next = 1;
+                end
+                if (clk_cnt_reg == 499) begin
                     clk_cnt_next = 0;
-                    state_next   = READ_DATA2;
+                    SCL_next     = 0;
+                    state_next   = HOLD;
                 end else clk_cnt_next = clk_cnt_reg + 1;
             end
 
-            READ_DATA2: begin
-                SDA_en_next = 0;
-                SCL_next = 0;
-                if (clk_cnt_reg == 249) begin
-                    clk_cnt_next = 0;
-                    state_next   = READ_DATA3;
-                end else clk_cnt_next = clk_cnt_reg + 1;
+
+            HOLD: begin
+                case ({
+                    I2C_START, I2C_STOP
+                })
+                    2'b00: state_next = WRITE;
+                    2'b01: state_next = STOP;
+                    2'b10: state_next = START;
+                    2'b11:  state_next = READ;
+                endcase
             end
 
-            READ_DATA3: begin
-                SDA_en_next = 0;
-                SCL_next = 1;
-                if (clk_cnt_reg == 249) begin
-                    clk_cnt_next = 0;
-                    rx_data_next = {rx_data_reg[6:0], SDA};
-                    state_next   = READ_DATA4;
-                end else clk_cnt_next = clk_cnt_reg + 1;
-            end
-
-            READ_DATA4: begin
+            READ: begin
                 SDA_en_next = 0;
                 SCL_next = 0;
-                if (clk_cnt_reg == 249) begin
+                if (clk_cnt_reg == 499) begin
                     clk_cnt_next = 0;
                     if (bit_cnt_reg == 7) begin
                         bit_cnt_next = 0;
                         SDA_en_next  = 1;
-                        SDA_out_next = 0;  // ACK
+                        SDA_out_next = 0;
                         rx_done_next = 1;
-                        state_next   = ACK1;
+                        state_next   = ACK;
                     end else begin
+                        rx_data_next = {rx_data_reg[6:0], SDA};
                         bit_cnt_next = bit_cnt_reg + 1;
-                        state_next   = READ_DATA1;
+                        state_next   = READ;
                     end
                 end else clk_cnt_next = clk_cnt_reg + 1;
             end
 
-            ACK1: begin
-                SDA_en_next = 0;
-                if (clk_cnt_reg == 249) begin
-                    clk_cnt_next = 0;
-                    SCL_next = 1;
-                    state_next = ACK2;
-                end else clk_cnt_next = clk_cnt_reg + 1;
-            end
-
-            ACK2: begin
-                SDA_en_next = 0;
-                if (clk_cnt_reg == 249) begin
-                    clk_cnt_next = 0;
-                    SCL_next = 1;
-                    state_next = ACK3;
-                end else clk_cnt_next = clk_cnt_reg + 1;
-            end
-
-            ACK3: begin
-                SDA_en_next = 0;
-                if (clk_cnt_reg == 249) begin
-                    clk_cnt_next = 0;
-                    SCL_next = 0;
-                    state_next = HOLD;
-                end else clk_cnt_next = clk_cnt_reg + 1;
-            end
-
-            HOLD: begin
-                if ((I2C_START == 0) && (I2C_STOP == 0)) state_next = DATA1;
-                else if ((I2C_START == 0) && (I2C_STOP == 1)) begin
-                    SDA_en_next = 1;
-                    SDA_out_next = 0;
-                    SCL_next = 1;
-                    state_next = STOP1;
-                end else if ((I2C_START == 1) && (I2C_STOP == 0)) begin
-                    state_next = START1;
-                end else if ((I2C_START == 1) && (I2C_STOP == 1)) begin
-                    SDA_en_next = 0;
-                    state_next  = READ_DATA1;
-                end
-            end
-
-            STOP1: begin
+            WRITE: begin
                 SDA_en_next  = 1;
-                SCL_next     = 1;
-                SDA_out_next = 1;
-                state_next   = STOP2;
+                SDA_out_next = tx_data_reg[7];
+                if (clk_cnt_reg == 999) begin
+                    clk_cnt_next = 0;
+                    if (bit_cnt_reg == 7) begin
+                        bit_cnt_next = 0;
+                        SDA_en_next  = 0;
+                        tx_done_next = 1;
+                        state_next   = ACK;
+                    end else begin
+                        bit_cnt_next = bit_cnt_reg + 1;
+                        tx_data_next = {tx_data_reg[6:0], 1'b0};
+                        state_next   = WRITE;
+                    end
+                end else clk_cnt_next = clk_cnt_reg + 1;
             end
 
-            STOP2: begin
-                SDA_en_next   = 1;
-                SCL_next      = 1;
-                SDA_out_next  = 1;
-                tx_ready_next = 1;
-                state_next    = IDLE;
+
+            STOP: begin
+                if (clk_cnt_reg == 499) begin
+                    clk_cnt_next = 0;
+                    SDA_en_next = 1;
+                    SCL_next = 1;
+                    SDA_out_next = 1;
+                    tx_ready_next = 1;
+                    state_next = IDLE;
+                end else clk_cnt_next = clk_cnt_reg + 1;
             end
 
-            default: state_next = IDLE;
         endcase
     end
 endmodule
