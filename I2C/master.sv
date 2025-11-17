@@ -1,287 +1,322 @@
 `timescale 1ns / 1ps
 
-module I2C_Master (
-    input  logic       clk,
-    input  logic       reset,
-    input  logic       I2C_START,
-    input  logic       I2C_STOP,
-    input  logic       I2C_ACK,
-    input  logic       I2C_EN,
-    input  logic [7:0] tx_data,
-    output logic       tx_done,
-    output logic       tx_ready,
-    output logic [7:0] rx_data,
-    output logic       rx_done,
-    output logic       SCL,
-    inout  logic       SDA
+module I2C_MASTER #(
+    parameter D_LENGTH = 2
+) (
+    // global ports
+    input  logic                      clk,
+    input  logic                      reset,
+    // internal ports
+    input  logic                      I2C_En,
+    input  logic [               6:0] addr,
+    input  logic                      CR_RW,
+    input  logic [               7:0] tx_data,
+    output logic                      tx_done,
+    output logic                      tx_ready,
+    output logic [               7:0] rx_data,
+    output logic                      rx_done,
+    input  logic                      I2C_start,
+    input  logic                      I2C_stop,
+    input  logic [$clog2(D_LENGTH):0] length,
+    // external ports
+    output logic                      SCL,
+    inout  logic                      SDA
 );
 
-    typedef enum {
-        IDLE,
-        START1,
-        START2,
-        DATA1,
-        DATA2,
-        DATA3,
-        DATA4,
-        READ_DATA1,
-        READ_DATA2,
-        READ_DATA3,
-        READ_DATA4,
-        ACK1,
-        ACK2,
-        ACK3,
-        ACK4,
-        HOLD,
-        STOP1,
-        STOP2
-    } state_s;
-
-    state_s state, state_next;
-    logic [8:0] clk_cnt_reg, clk_cnt_next;
-    logic [2:0] bit_cnt_reg, bit_cnt_next;
     logic [7:0] tx_data_reg, tx_data_next;
     logic [7:0] rx_data_reg, rx_data_next;
-    logic SCL_reg, SCL_next;
-    logic SDA_out, SDA_out_next;
-    logic SDA_en, SDA_en_next;
-    logic tx_done_reg, tx_done_next;
-    logic rx_done_reg, rx_done_next;
-    logic tx_ready_reg, tx_ready_next;
+    logic tx_done_next, tx_done_reg;
+    logic rx_done_next, rx_done_reg;
 
-    assign SCL = SCL_reg;
-    assign SDA = SDA_en ? SDA_out : 1'bz;
+    logic [$clog2(D_LENGTH):0] length_next, length_reg;
+
+    logic SDA_EN;
+    logic O_SDA;
+    logic SCL_REG, SCL_NEXT;
+    logic addr_sig_reg, addr_sig_next;
+    logic ACK_LOW_REG, ACK_LOW_NEXT;
+
+    logic [$clog2(500)-1:0] clk_counter_reg, clk_counter_next;
+    logic [$clog2(4)-1:0] data_cnt_reg, data_cnt_next;
+    logic [$clog2(7)-1:0] bit_counter_reg, bit_counter_next;
+
     assign tx_done = tx_done_reg;
     assign rx_done = rx_done_reg;
-    assign tx_ready = tx_ready_reg;
     assign rx_data = rx_data_reg;
 
-    always_ff @(posedge clk or posedge reset) begin
+    assign SCL = SCL_REG;
+
+
+    typedef enum logic [3:0] {
+        ST_IDLE,
+        ST_START1,
+        ST_START2,
+        ST_WRITE,
+        ST_READ,  // slave -> master (read DATA)
+        ST_ACK,
+        ST_WRITE_ACK,
+        ST_READ_ACK,  // master -> slave (ACK/NACK)
+        ST_HOLD,
+        ST_HOLD2,
+        ST_STOP1,
+        ST_STOP2
+    } i2c_state_t;
+
+    i2c_state_t state, next_state;
+
+    assign SDA = (SDA_EN) ? O_SDA : 1'bz;
+
+    always_ff @(posedge clk, posedge reset) begin
         if (reset) begin
-            clk_cnt_reg  <= 0;
-            bit_cnt_reg  <= 0;
-            SCL_reg      <= 1;
-            SDA_out      <= 1;
-            SDA_en       <= 1;
-            tx_data_reg  <= 0;
-            rx_data_reg  <= 0;
-            state        <= IDLE;
-            tx_done_reg  <= 0;
-            rx_done_reg  <= 0;
-            tx_ready_reg <= 1;
+            state           <= ST_IDLE;
+            tx_data_reg     <= 8'h00;
+            rx_data_reg     <= 8'h00;
+            clk_counter_reg <= 0;
+            bit_counter_reg <= 0;
+            data_cnt_reg    <= 0;
+            tx_done_reg     <= 0;
+            rx_done_reg     <= 0;
+            SCL_REG         <= 1;
+            addr_sig_reg    <= 1;
+            ACK_LOW_REG     <= 0;
+            length_reg      <= 0;
         end else begin
-            clk_cnt_reg  <= clk_cnt_next;
-            bit_cnt_reg  <= bit_cnt_next;
-            SCL_reg      <= SCL_next;
-            SDA_out      <= SDA_out_next;
-            SDA_en       <= SDA_en_next;
-            tx_data_reg  <= tx_data_next;
-            rx_data_reg  <= rx_data_next;
-            state        <= state_next;
-            tx_done_reg  <= tx_done_next;
-            rx_done_reg  <= rx_done_next;
-            tx_ready_reg <= tx_ready_next;
+            state           <= next_state;
+            tx_data_reg     <= tx_data_next;
+            rx_data_reg     <= rx_data_next;
+            clk_counter_reg <= clk_counter_next;
+            bit_counter_reg <= bit_counter_next;
+            data_cnt_reg    <= data_cnt_next;
+            tx_done_reg     <= tx_done_next;
+            rx_done_reg     <= rx_done_next;
+            SCL_REG         <= SCL_NEXT;
+            addr_sig_reg    <= addr_sig_next;
+            ACK_LOW_REG     <= ACK_LOW_NEXT;
+            length_reg      <= length_next;
         end
+
     end
 
     always_comb begin
-        clk_cnt_next  = clk_cnt_reg;
-        bit_cnt_next  = bit_cnt_reg;
-        SCL_next      = SCL_reg;
-        SDA_out_next  = SDA_out;
-        SDA_en_next   = SDA_en;
-        tx_data_next  = tx_data_reg;
-        rx_data_next  = rx_data_reg;
-        tx_done_next  = 0;
-        rx_done_next  = 0;
-        tx_ready_next = tx_ready_reg;
-        state_next    = state;
-
+        next_state       = state;
+        O_SDA            = 1'b1;
+        SCL_NEXT         = SCL_REG;
+        tx_data_next     = tx_data_reg;
+        rx_data_next     = rx_data_reg;
+        clk_counter_next = clk_counter_reg;
+        bit_counter_next = bit_counter_reg;
+        data_cnt_next    = data_cnt_reg;
+        tx_done_next     = 1'b0;
+        SDA_EN           = 1'b1;
+        tx_ready         = 1'b0;
+        rx_done_next     = 1'b0;
+        addr_sig_next    = addr_sig_reg;
+        ACK_LOW_NEXT     = ACK_LOW_REG;
+        length_next      = length_reg;
         case (state)
-            IDLE: begin
-                SDA_en_next   = 1;
-                SDA_out_next  = 1;
-                SCL_next      = 1;
-                tx_ready_next = 1;
-                if (I2C_EN) begin
-                    tx_data_next  = tx_data;
-                    tx_ready_next = 0;
-                    SDA_out_next  = 0;
-                    SCL_next      = 1;
-                    state_next    = START1;
+            ST_IDLE: begin
+                O_SDA    = 1'b1;
+                SCL_NEXT = 1'b1;
+                tx_ready = 1'b1;
+                if (I2C_En) begin
+                    next_state    = ST_START1;
+                    addr_sig_next = 1'b1;
+                    length_next   = length;
+                    tx_data_next  = {addr, CR_RW};
                 end
             end
-
-            START1: begin
-                if (clk_cnt_reg == 499) begin
-                    clk_cnt_next = 0;
-                    SCL_next     = 0;
-                    state_next   = START2;
-                end else clk_cnt_next = clk_cnt_reg + 1;
+            ST_HOLD2: begin
+                next_state   = ST_WRITE;
+                tx_data_next = tx_data;
             end
-
-            START2: begin
-                if (clk_cnt_reg == 499) begin
-                    clk_cnt_next = 0;
-                    SDA_out_next = tx_data_reg[7];
-                    SDA_en_next  = 1;
-                    SCL_next     = 0;
-                    state_next   = DATA1;
-                end else clk_cnt_next = clk_cnt_reg + 1;
-            end
-
-            DATA1: begin
-                SDA_en_next  = 1;
-                SDA_out_next = tx_data_reg[7];
-                if (clk_cnt_reg == 249) begin
-                    clk_cnt_next = 0;
-                    SCL_next = 1;
-                    state_next = DATA2;
-                end else clk_cnt_next = clk_cnt_reg + 1;
-            end
-
-            DATA2: begin
-                SDA_en_next  = 1;
-                SDA_out_next = tx_data_reg[7];
-                if (clk_cnt_reg == 249) begin
-                    clk_cnt_next = 0;
-                    SCL_next = 1;
-                    state_next = DATA3;
-                end else clk_cnt_next = clk_cnt_reg + 1;
-            end
-
-            DATA3: begin
-                SDA_en_next  = 1;
-                SDA_out_next = tx_data_reg[7];
-                if (clk_cnt_reg == 249) begin
-                    clk_cnt_next = 0;
-                    SCL_next = 0;
-                    tx_data_next = {tx_data_reg[6:0], 1'b0};
-                    state_next = DATA4;
-                end else clk_cnt_next = clk_cnt_reg + 1;
-            end
-
-            DATA4: begin
-                SDA_en_next  = 1;
-                SDA_out_next = tx_data_reg[7];
-                if (clk_cnt_reg == 249) begin
-                    clk_cnt_next = 0;
-                    if (bit_cnt_reg == 7) begin
-                        bit_cnt_next = 0;
-                        SDA_en_next  = 0;
-                        tx_done_next = 1;
-                        state_next   = ACK1;
-                    end else begin
-                        bit_cnt_next = bit_cnt_reg + 1;
-                        state_next   = DATA1;
-                    end
-                end else clk_cnt_next = clk_cnt_reg + 1;
-            end
-
-            READ_DATA1: begin
-                SDA_en_next = 0;
-                SCL_next = 0;
-                if (clk_cnt_reg == 249) begin
-                    clk_cnt_next = 0;
-                    state_next   = READ_DATA2;
-                end else clk_cnt_next = clk_cnt_reg + 1;
-            end
-
-            READ_DATA2: begin
-                SDA_en_next = 0;
-                SCL_next = 0;
-                if (clk_cnt_reg == 249) begin
-                    clk_cnt_next = 0;
-                    state_next   = READ_DATA3;
-                end else clk_cnt_next = clk_cnt_reg + 1;
-            end
-
-            READ_DATA3: begin
-                SDA_en_next = 0;
-                SCL_next = 1;
-                if (clk_cnt_reg == 249) begin
-                    clk_cnt_next = 0;
-                    rx_data_next = {rx_data_reg[6:0], SDA};
-                    state_next   = READ_DATA4;
-                end else clk_cnt_next = clk_cnt_reg + 1;
-            end
-
-            READ_DATA4: begin
-                SDA_en_next = 0;
-                SCL_next = 0;
-                if (clk_cnt_reg == 249) begin
-                    clk_cnt_next = 0;
-                    if (bit_cnt_reg == 7) begin
-                        bit_cnt_next = 0;
-                        SDA_en_next  = 1;
-                        SDA_out_next = 0;  // ACK
-                        rx_done_next = 1;
-                        state_next   = ACK1;
-                    end else begin
-                        bit_cnt_next = bit_cnt_reg + 1;
-                        state_next   = READ_DATA1;
-                    end
-                end else clk_cnt_next = clk_cnt_reg + 1;
-            end
-
-            ACK1: begin
-                SDA_en_next = 0;
-                if (clk_cnt_reg == 249) begin
-                    clk_cnt_next = 0;
-                    SCL_next = 1;
-                    state_next = ACK2;
-                end else clk_cnt_next = clk_cnt_reg + 1;
-            end
-
-            ACK2: begin
-                SDA_en_next = 0;
-                if (clk_cnt_reg == 249) begin
-                    clk_cnt_next = 0;
-                    SCL_next = 1;
-                    state_next = ACK3;
-                end else clk_cnt_next = clk_cnt_reg + 1;
-            end
-
-            ACK3: begin
-                SDA_en_next = 0;
-                if (clk_cnt_reg == 249) begin
-                    clk_cnt_next = 0;
-                    SCL_next = 0;
-                    state_next = HOLD;
-                end else clk_cnt_next = clk_cnt_reg + 1;
-            end
-
-            HOLD: begin
-                if ((I2C_START == 0) && (I2C_STOP == 0)) state_next = DATA1;
-                else if ((I2C_START == 0) && (I2C_STOP == 1)) begin
-                    SDA_en_next = 1;
-                    SDA_out_next = 0;
-                    SCL_next = 1;
-                    state_next = STOP1;
-                end else if ((I2C_START == 1) && (I2C_STOP == 0)) begin
-                    state_next = START1;
-                end else if ((I2C_START == 1) && (I2C_STOP == 1)) begin
-                    SDA_en_next = 0;
-                    state_next  = READ_DATA1;
+            ST_HOLD: begin
+                if (!I2C_start && I2C_stop) begin
+                    SCL_NEXT   = 1;
+                    next_state = ST_STOP1;
+                end
+                if (I2C_start && !I2C_stop) begin
+                    SCL_NEXT      = 1;
+                    addr_sig_next = 1'b1;
+                    length_next   = length;
+                    tx_data_next  = {addr, CR_RW};
+                    next_state    = ST_START1;
                 end
             end
-
-            STOP1: begin
-                SDA_en_next  = 1;
-                SCL_next     = 1;
-                SDA_out_next = 1;
-                state_next   = STOP2;
+            ST_START1: begin
+                O_SDA = 0;
+                if (clk_counter_reg == 499) begin
+                    clk_counter_next = 0;
+                    SCL_NEXT = 0;
+                    next_state = ST_START2;
+                end else begin
+                    clk_counter_next = clk_counter_reg + 1;
+                end
             end
-
-            STOP2: begin
-                SDA_en_next   = 1;
-                SCL_next      = 1;
-                SDA_out_next  = 1;
-                tx_ready_next = 1;
-                state_next    = IDLE;
+            ST_START2: begin
+                O_SDA = 0;
+                if (clk_counter_reg == 499) begin
+                    clk_counter_next = 0;
+                    SCL_NEXT         = 0;
+                    next_state       = ST_WRITE;
+                end else begin
+                    clk_counter_next = clk_counter_reg + 1;
+                end
             end
-
-            default: state_next = IDLE;
+            ST_WRITE: begin
+                O_SDA = tx_data_reg[7];
+                if ((bit_counter_reg == 7) && (data_cnt_reg == 3)) begin
+                    SDA_EN = 1'b0;
+                end
+                if (clk_counter_reg == 249) begin
+                    SCL_NEXT = (data_cnt_reg == 0 || data_cnt_reg == 2) ? ~SCL_NEXT : SCL_NEXT;
+                    clk_counter_next = 0;
+                    if (data_cnt_reg == 3) begin
+                        data_cnt_next = 0;
+                        tx_data_next  = {tx_data_reg[6:0], 1'b0};
+                        if (bit_counter_reg == 7) begin
+                            bit_counter_next = 0;
+                            SCL_NEXT = 0;
+                            next_state = (addr_sig_reg) ? ST_ACK : ST_WRITE_ACK;
+                        end else begin
+                            bit_counter_next = bit_counter_reg + 1;
+                        end
+                    end else begin
+                        data_cnt_next = data_cnt_reg + 1;
+                    end
+                end else begin
+                    clk_counter_next = clk_counter_reg + 1;
+                end
+            end
+            ST_READ: begin
+                if ((bit_counter_reg == 7) && (data_cnt_reg == 3)) begin
+                    SDA_EN = 1'b1;
+                end else begin
+                    SDA_EN = 1'b0;
+                end
+                if (clk_counter_reg == 249) begin
+                    SCL_NEXT = (data_cnt_reg == 0 || data_cnt_reg == 2) ? ~SCL_NEXT : SCL_NEXT;
+                    clk_counter_next = 0;
+                    if (data_cnt_reg == 1) begin
+                        rx_data_next = {rx_data_reg[6:0], SDA};
+                    end
+                    if (data_cnt_reg == 3) begin
+                        data_cnt_next = 0;
+                        if (bit_counter_reg == 7) begin
+                            bit_counter_next = 0;
+                            SCL_NEXT         = 0;
+                            next_state       = ST_READ_ACK;
+                        end else begin
+                            bit_counter_next = bit_counter_reg + 1;
+                        end
+                    end else begin
+                        data_cnt_next = data_cnt_reg + 1;
+                    end
+                end else begin
+                    clk_counter_next = clk_counter_reg + 1;
+                end
+            end
+            ST_ACK: begin
+                SDA_EN = 1'b0;
+                if (clk_counter_reg == 249) begin
+                    SCL_NEXT = (data_cnt_reg == 0 || data_cnt_reg == 2) ? ~SCL_NEXT : SCL_NEXT;
+                    clk_counter_next = 0;
+                    if (data_cnt_reg == 3) begin
+                        data_cnt_next = 0;
+                        tx_done_next  = 1;
+                        ///edit
+                        if (!ACK_LOW_REG) begin
+                            next_state    = (length_reg == 0) ? ST_STOP1 : (CR_RW == 1) ? ST_READ : ST_HOLD2;
+                            SCL_NEXT      = (length_reg == 0) ? 1 : 0;  // STOP : DATA
+                            addr_sig_next = 1'b0;
+                            length_next   = length_reg - 1;
+                        end else begin
+                            SCL_NEXT   = 1;
+                            next_state = ST_STOP1;
+                        end
+                        ///
+                    end else begin
+                        data_cnt_next = data_cnt_reg + 1;
+                    end
+                    if (data_cnt_reg == 1) ACK_LOW_NEXT = SDA;
+                end else begin
+                    clk_counter_next = clk_counter_reg + 1;
+                end
+            end
+            /////EDIT
+            ST_WRITE_ACK: begin
+                SDA_EN = 1'b0;
+                O_SDA  = 1'b1;
+                if (clk_counter_reg == 249) begin
+                    SCL_NEXT = (data_cnt_reg == 0 || data_cnt_reg == 2) ? ~SCL_NEXT : SCL_NEXT;
+                    clk_counter_next = 0;
+                    if (data_cnt_reg == 3) begin
+                        data_cnt_next = 0;
+                        tx_done_next  = 1;
+                        if (!ACK_LOW_REG) begin
+                            if (length_reg == 0) begin
+                                SCL_NEXT   = 1;
+                                next_state = ST_HOLD;
+                            end else begin
+                                tx_data_next = tx_data;
+                                SCL_NEXT     = 0;
+                                next_state   = ST_HOLD2;
+                                length_next  = length_reg - 1;
+                            end
+                        end else begin
+                            SCL_NEXT   = 1;
+                            next_state = ST_STOP1;
+                        end
+                    end else begin
+                        data_cnt_next = data_cnt_reg + 1;
+                    end
+                    if (data_cnt_reg == 1) ACK_LOW_NEXT = SDA;
+                end else begin
+                    clk_counter_next = clk_counter_reg + 1;
+                end
+            end
+            ST_READ_ACK: begin
+                SDA_EN = 1'b1;
+                O_SDA  = (length_reg == 0) ? 1'b1 : 1'b0;  // nack : ack
+                if (clk_counter_reg == 249) begin
+                    SCL_NEXT = (data_cnt_reg == 0 || data_cnt_reg == 2) ? ~SCL_NEXT : SCL_NEXT;
+                    clk_counter_next = 0;
+                    if (data_cnt_reg == 3) begin
+                        data_cnt_next = 0;
+                        rx_done_next  = 1;
+                        if (length_reg == 0) begin
+                            next_state = ST_HOLD;
+                        end else begin
+                            SCL_NEXT    = 0;
+                            next_state  = ST_READ;
+                            length_next = length_reg - 1;
+                        end
+                    end else begin
+                        data_cnt_next = data_cnt_reg + 1;
+                    end
+                end else begin
+                    clk_counter_next = clk_counter_reg + 1;
+                end
+            end
+            ST_STOP1: begin
+                O_SDA = 0;
+                if (clk_counter_reg == 499) begin
+                    clk_counter_next = 0;
+                    next_state = ST_STOP2;
+                    SCL_NEXT = 1;
+                end else begin
+                    clk_counter_next = clk_counter_reg + 1;
+                end
+            end
+            ST_STOP2: begin
+                O_SDA = 1;
+                if (clk_counter_reg == 499) begin
+                    clk_counter_next = 0;
+                    next_state = ST_IDLE;
+                    SCL_NEXT = 1'b1;
+                end else begin
+                    clk_counter_next = clk_counter_reg + 1;
+                end
+            end
         endcase
     end
 endmodule
